@@ -1679,6 +1679,7 @@ string IQTree::perturbStableSplits(double suppValue) {
     return getTreeString();
 }
 
+
 string IQTree::doRandomNNIs(bool storeTabu) {
     int cntNNI = 0;
     int numRandomNNI;
@@ -1695,6 +1696,7 @@ string IQTree::doRandomNNIs(bool storeTabu) {
             numRandomNNI = 1;
     }
 
+
     initTabuSplits.clear();
     while (cntNNI < numRandomNNI) {
         nniBranches.clear();
@@ -1706,8 +1708,70 @@ string IQTree::doRandomNNIs(bool storeTabu) {
         for (Branches::iterator it = nniBranches.begin(); it != nniBranches.end(); ++it) {
             vectorNNIBranches.push_back(it->second);
         }
-        int randInt = random_int((int) vectorNNIBranches.size());
-        NNIMove randNNI = getRandomNNI(vectorNNIBranches[randInt]);
+        // int randInt = random_int((int) vectorNNIBranches.size());
+        // NNIMove randNNI = getRandomNNI(vectorNNIBranches[randInt]);
+        // ---- length-biased selection: p(i) ∝ len(u,v)^(-alpha) ----
+
+
+        auto getBranchLengthSafe = [&](const Branch &b) -> double {
+            Node *u = b.first;
+            Node *v = b.second;
+
+
+            // Prefer neighbor from u to v
+            double L = 0.0;
+            if (Neighbor* n = u->findNeighbor(v)) {
+                L = n->length;
+            } else if (Neighbor* m = v->findNeighbor(u)) {
+                // Fallback (shouldn’t normally happen if the tree is consistent)
+                L = m->length;
+            } else {
+                // If neither side sees the other, use 0 so weight=0^(-alpha)=1
+                L = 0.0;
+            }
+
+
+            if (!(L >= 0.0) || std::isnan(L)) L = 0.0;  // Keep safe for L^-alpha
+            std::cout << L << std::endl;
+            return L;
+        };
+
+
+        // Set the value of alpha for testing (e.g., 2, 3, 4, etc.)
+        double alpha = 2.0; // You can change this value to 3, 4, etc.
+
+
+        std::vector<double> weights;
+        weights.reserve(vectorNNIBranches.size());
+        double sumW = 0.0;
+        for (const auto &br : vectorNNIBranches) {
+            const double L = getBranchLengthSafe(br);
+            // Compute weight as len^(-alpha)
+            const double w = std::pow(L, -alpha); // Updated weight calculation
+            // const double w = std::exp(-alpha * L);
+            weights.push_back(w);
+            sumW += w;
+        }
+
+        // Sample index proportional to weights (implicit normalization)
+        int picked = 0;
+        if (sumW > 0.0) {
+            const double u = random_double() * sumW;
+            double acc = 0.0;
+            for (size_t i = 0; i < weights.size(); ++i) {
+                acc += weights[i];
+                if (u <= acc) { picked = static_cast<int>(i); break; }
+            }
+        } else {
+            // Degenerate fallback: uniform
+            picked = random_int((int)vectorNNIBranches.size());
+        }
+
+
+        NNIMove randNNI = getRandomNNI(vectorNNIBranches[picked]);
+        // ---- end length-biased selection ----
+
+
         if (constraintTree.isCompatible(randNNI)) {
             // only if random NNI satisfies constraintTree
             doNNI(randNNI);
