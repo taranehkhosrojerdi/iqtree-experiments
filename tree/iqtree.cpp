@@ -1736,9 +1736,8 @@ string IQTree::doRandomNNIs(bool storeTabu) {
             return L;
         };
 
-
-        // Set the value of alpha for testing (e.g., 2, 3, 4, etc.)
-        double alpha = 2.0; // You can change this value to 3, 4, etc.
+        // Alpha is set via input argument, the default value is 0
+        double alpha = Params::getInstance().nniAlpha;
 
 
         std::vector<double> weights;
@@ -1747,7 +1746,7 @@ string IQTree::doRandomNNIs(bool storeTabu) {
         for (const auto &br : vectorNNIBranches) {
             const double L = getBranchLengthSafe(br);
             // Compute weight as len^(-alpha)
-            const double w = std::pow(L, -alpha); // Updated weight calculation
+            const double w = (L > 0.0) ? std::pow(L, -alpha) : 1.0;// Updated weight calculation
             // const double w = std::exp(-alpha * L);
             weights.push_back(w);
             sumW += w;

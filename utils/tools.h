@@ -765,6 +765,11 @@ public:
 	 */
 	double initPS;
 
+    /**
+	 *  weight for bias towards shorter branches in random perturbation
+	 */
+	double nniAlpha;
+
 	/**
 	 *  logl epsilon for model parameter optimization
 	 */

@@ -5079,6 +5079,16 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.openmp_by_model = false;
                 continue;
             }
+                        
+            if (strcmp(argv[cnt], "--nni-alpha") == 0 || strcmp(argv[cnt], "-nni-alpha") == 0) {
+                if (cnt + 1 >= argc)
+                    throw "Use --nni-alpha <double>";
+                double v = atof(argv[++cnt]);
+                if (!(v >= 0.0) || std::isnan(v))
+                    throw "--nni-alpha must be a non-negative real number";
+                Params::getInstance().nniAlpha = v;  // public, like initPS
+                continue;
+            }
 
 //			if (strcmp(argv[cnt], "-rootstate") == 0) {
 //                cnt++;
@@ -7787,6 +7797,7 @@ void Params::setDefault() {
     new_heuristic = true;
     iteration_multiple = 1;
     initPS = 0.5;
+    nniAlpha = 0.0;
 #ifdef USING_PLL
     pll = true;
 #else
