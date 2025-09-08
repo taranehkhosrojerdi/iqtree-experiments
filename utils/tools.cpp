@@ -5089,6 +5089,28 @@ void parseArg(int argc, char *argv[], Params &params) {
                 Params::getInstance().nniAlpha = v;  // public, like initPS
                 continue;
             }
+            
+            // --nni-int-bias {off|ab|min}
+            if (strcmp(argv[cnt], "--nni-int-bias") == 0 || strcmp(argv[cnt], "-nni-int-bias") == 0) {
+                if (cnt + 1 >= argc) throw "Use --nni-int-bias {off|ab|min}";
+                const char* val = argv[++cnt];
+                int mode = 0;
+                if      (strcmp(val, "off") == 0) mode = 0;
+                else if (strcmp(val, "ab")  == 0) mode = 1;   // weight ∝ (a*b)^gamma
+                else if (strcmp(val, "min") == 0) mode = 2;   // weight ∝ min(a,b)^gamma
+                else throw "Unknown value for --nni-int-bias (use off|ab|min)";
+                Params::getInstance().nniCladeBiasMode = mode;
+                continue;
+            }
+
+            // --nni-int-gamma <double>
+            if (strcmp(argv[cnt], "--nni-int-gamma") == 0 || strcmp(argv[cnt], "-nni-int-gamma") == 0) {
+                if (cnt + 1 >= argc) throw "Use --nni-int-gamma <double>";
+                double g = atof(argv[++cnt]);
+                if (!(g >= 0.0) || std::isnan(g)) throw "--nni-int-gamma must be non-negative";
+                Params::getInstance().nniCladeBiasGamma = g;
+                continue;
+            }
 
 //			if (strcmp(argv[cnt], "-rootstate") == 0) {
 //                cnt++;
@@ -7798,6 +7820,8 @@ void Params::setDefault() {
     iteration_multiple = 1;
     initPS = 0.5;
     nniAlpha = 0.0;
+    nniCladeBiasMode = 0;
+    nniCladeBiasGamma = 1.0;
 #ifdef USING_PLL
     pll = true;
 #else

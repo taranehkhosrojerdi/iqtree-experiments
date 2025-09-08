@@ -770,11 +770,21 @@ public:
 	 */
 	double nniAlpha;
 
+    /**
+	 *  mode for bias towards more internal branches in random perturbation, 0=OFF, 1=PRODUCT (a*b), 2=MIN(min(a,b)
+	 */
+	int nniCladeBiasMode;
+
 	/**
+	 *  weight for bias towards more internal branches in random perturbation
+	 */
+	double nniCladeBiasGamma;
+    
+    /**
 	 *  logl epsilon for model parameter optimization
 	 */
 	double modelEps;
-    
+
     /**
      * logl epsilon for fundi model parameter optimization
      */

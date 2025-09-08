@@ -1697,7 +1697,6 @@ string IQTree::doRandomNNIs(bool storeTabu) {
     }
 
 
-    initTabuSplits.clear();
     while (cntNNI < numRandomNNI) {
         nniBranches.clear();
         nonNNIBranches.clear();
@@ -1708,6 +1707,22 @@ string IQTree::doRandomNNIs(bool storeTabu) {
         for (Branches::iterator it = nniBranches.begin(); it != nniBranches.end(); ++it) {
             vectorNNIBranches.push_back(it->second);
         }
+        // Return (a,b) where a is the smaller clade size across branch (u,v)
+        auto getCladeSizes = [&](const Branch& br) -> std::pair<int,int> {
+            Node* u = br.first;
+            Node* v = br.second;
+
+            // Look up the neighbor entry u->v and use its cached split
+            Neighbor* n = u->findNeighbor(v);
+            int a = 1; // sensible fallback for pendant edge
+            if (n && n->split) {
+                a = n->split->countTaxa();   // O(1): number of taxa on the v-side clade
+            }
+            int b = leafNum - a;
+            if (a > b) std::swap(a, b);      // keep a = min(a,b)
+            return {a, b};
+        };
+
         // int randInt = random_int((int) vectorNNIBranches.size());
         // NNIMove randNNI = getRandomNNI(vectorNNIBranches[randInt]);
         // ---- length-biased selection: p(i) ∝ len(u,v)^(-alpha) ----
@@ -1738,15 +1753,29 @@ string IQTree::doRandomNNIs(bool storeTabu) {
 
         // Alpha is set via input argument, the default value is 0
         double alpha = Params::getInstance().nniAlpha;
-
+        const int mode = Params::getInstance().nniCladeBiasMode;
+        const double gamma = Params::getInstance().nniCladeBiasGamma;
 
         std::vector<double> weights;
         weights.reserve(vectorNNIBranches.size());
         double sumW = 0.0;
         for (const auto &br : vectorNNIBranches) {
             const double L = getBranchLengthSafe(br);
-            // Compute weight as len^(-alpha)
-            const double w = (L > 0.0) ? std::pow(L, -alpha) : 1.0;// Updated weight calculation
+            double wInternal = 1.0;
+            if (mode) {
+                auto [a, b] = getCladeSizes(br);
+                if (mode == 1) {                 // ab mode
+                    wInternal = std::pow( (double)a * (double)b, gamma );
+                } else if (mode == 2) {          // min mode
+                    wInternal = std::pow( (double)std::min(a,b), gamma );
+                }
+            }
+            
+            const double wLen = (L > 0.0) ? std::pow(L, -alpha) : 1.0; // Updated weight calculation (This line is being run as w = ...)
+
+            // final weight (multiplicative with length bias)
+            const double w = wLen * wInternal;
+
             // const double w = std::exp(-alpha * L);
             weights.push_back(w);
             sumW += w;
