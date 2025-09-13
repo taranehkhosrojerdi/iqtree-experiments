@@ -766,9 +766,19 @@ public:
 	double initPS;
 
     /**
+	 *  mode for bias towards shorter branches in random perturbation, 0=OFF, 1=powlen, 2=explen, 3=powlens, 4=powrank, 5=powranks
+	 */
+	double nniShortBiasMode;
+
+    /**
 	 *  weight for bias towards shorter branches in random perturbation
 	 */
 	double nniAlpha;
+
+    /**
+	 *  shift multiplier parameter for bias towards shorter branches in random perturbation
+	 */
+    double nniShortBiasShift;
 
     /**
 	 *  mode for bias towards more internal branches in random perturbation, 0=OFF, 1=PRODUCT (a*b), 2=MIN(min(a,b)

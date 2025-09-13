@@ -5090,6 +5090,31 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
             
+            // --nni-short-bias {off|powlen|explen|powlens|powrank|powranks}
+            if (strcmp(argv[cnt], "--nni-short-bias") == 0 || strcmp(argv[cnt], "-nni-short-bias") == 0) {
+                if (cnt + 1 >= argc) throw "Use --nni-short-bias {off|powlen|explen|powlens|powrank|powranks}";
+                const char* val = argv[++cnt];
+                int mode = 0;
+                if      (strcmp(val, "off")     == 0) mode = 0;
+                else if (strcmp(val, "powlen")  == 0) mode = 1;   // weight ∝ (len)^(-alpha)
+                else if (strcmp(val, "explen")  == 0) mode = 2;   // weight ∝ exp(-alpha * len)
+                else if (strcmp(val, "powlens") == 0) mode = 3;   // weight ∝ (beta + len)^(-alpha)
+                else if (strcmp(val, "powrank") == 0) mode = 4;   // weight ∝ (rank/E)^(-alpha)
+                else if (strcmp(val, "powranks")== 0) mode = 5;   // weight ∝ (beta + rank/E)^(-alpha)
+                else throw "Unknown value for --nni-short-bias (use off|powlen|explen|powlens|powrank|powranks)";
+                Params::getInstance().nniShortBiasMode = mode;
+                continue;
+            }
+
+            // --nni-short-bias-shift <double>
+            if (strcmp(argv[cnt], "--nni-short-bias-shift") == 0 || strcmp(argv[cnt], "-nni-short-bias-shift") == 0) {
+                if (cnt + 1 >= argc) throw "Use --nni-short-bias-shift <double>";
+                double b = atof(argv[++cnt]);
+                if (!(b >= 0.0) || std::isnan(b)) throw "--nni-short-bias-shift must be positive";
+                Params::getInstance().nniShortBiasShift = b;
+                continue;
+            }
+
             // --nni-int-bias {off|ab|min}
             if (strcmp(argv[cnt], "--nni-int-bias") == 0 || strcmp(argv[cnt], "-nni-int-bias") == 0) {
                 if (cnt + 1 >= argc) throw "Use --nni-int-bias {off|ab|min}";
@@ -7819,7 +7844,9 @@ void Params::setDefault() {
     new_heuristic = true;
     iteration_multiple = 1;
     initPS = 0.5;
+    nniShortBiasMode = 0;
     nniAlpha = 0.0;
+    nniShortBiasShift = 0;
     nniCladeBiasMode = 0;
     nniCladeBiasGamma = 1.0;
 #ifdef USING_PLL

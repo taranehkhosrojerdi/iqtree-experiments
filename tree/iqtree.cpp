@@ -1679,143 +1679,210 @@ string IQTree::perturbStableSplits(double suppValue) {
     return getTreeString();
 }
 
+// ---------- file-local helpers for doRandomNNIs (place above the function) ----------
+static double branchLengthSafe(const Branch& b) {
+    Node* u = b.first;
+    Node* v = b.second;
+    double L = 0.0;
+    if (Neighbor* n = u->findNeighbor(v))       L = n->length;
+    else if (Neighbor* m = v->findNeighbor(u))  L = m->length;
+    if (!(L >= 0.0) || std::isnan(L)) L = 0.0;
+    return L;
+}
+
+static std::vector<double> computeRankOverE(const std::vector<Branch>& branches,
+                                            const std::vector<double>& lengths) {
+    const size_t E = branches.size();
+    std::vector<size_t> idx(E);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(), [&](size_t i, size_t j){ return lengths[i] < lengths[j]; });
+
+    std::vector<double> rOverE(E, 0.0);
+    for (size_t r = 0; r < E; ++r) rOverE[idx[r]] = double(r + 1) / double(E); // 1..E → (0,1]
+    return rOverE;
+}
+
+// mode: 0=off, 1=powlen, 2=explen, 3=powlens, 4=powrank, 5=powranks
+static std::vector<double> computeShortBiasWeights(
+        int mode, double alpha, double beta,
+        const std::vector<double>& lengths,
+        const std::vector<double>& rOverE /* empty unless rank-based */) {
+    const size_t E = lengths.size();
+    std::vector<double> w(E, 1.0);
+    if (mode == 0 || alpha == 0.0) return w;
+
+    constexpr double eps = 1e-12;
+
+    // Compute median branch length once (needed for shifted modes)
+    double Lmed = 0.0;
+    if ((mode == 3 || mode == 5) && !lengths.empty()) {
+        std::vector<double> sorted = lengths;
+        std::sort(sorted.begin(), sorted.end());
+        if (E % 2 == 0) {
+            Lmed = 0.5 * (sorted[E/2 - 1] + sorted[E/2]);
+        } else {
+            Lmed = sorted[E/2];
+        }
+    }
+
+    switch (mode) {
+        case 1: // powlen: (len)^(-alpha)
+            for (size_t i = 0; i < E; ++i)
+                w[i] = std::pow(std::max(lengths[i], eps), -alpha);
+            break;
+
+        case 2: { // explen: exp(-alpha * len) — stabilized
+            double m = std::numeric_limits<double>::infinity();
+            for (double L : lengths) m = std::min(m, alpha * L);
+            for (size_t i = 0; i < E; ++i)
+                w[i] = std::exp(-(alpha * lengths[i] - m));
+            break;
+        }
+
+        case 3: { // powlens: (beta*Lmed + len)^(-alpha)
+            const double shift = std::max(beta * Lmed, eps);
+            for (size_t i = 0; i < E; ++i)
+                w[i] = std::pow(shift + lengths[i], -alpha);
+            break;
+        }
+
+        case 4: // powrank: (rank/E)^(-alpha)
+            for (size_t i = 0; i < E; ++i)
+                w[i] = std::pow(std::max(rOverE[i], eps), -alpha);
+            break;
+
+        case 5: { // powranks: (beta*Lmed + rank/E)^(-alpha)
+            const double shift = std::max(beta * Lmed, eps);
+            for (size_t i = 0; i < E; ++i)
+                w[i] = std::pow(shift + rOverE[i], -alpha);
+            break;
+        }
+
+        default: break; // treat as off
+    }
+    return w;
+}
+
+static void mulInPlace(std::vector<double>& a, const std::vector<double>& b) {
+    for (size_t i = 0; i < a.size(); ++i) a[i] *= b[i];
+}
+
+static int sampleIndexByWeights(const std::vector<double>& w) {
+    double sumW = 0.0;
+    for (double x : w) sumW += x;
+
+    if (!(sumW > 0.0)) {
+        return random_int((int)w.size()); // uniform fallback
+    }
+    const double u = random_double() * sumW;
+    double acc = 0.0;
+    for (size_t i = 0; i < w.size(); ++i) {
+        acc += w[i];
+        if (u <= acc) return (int)i;
+    }
+    return (int)w.size() - 1;
+}
+// ---------- end helpers ----------
 
 string IQTree::doRandomNNIs(bool storeTabu) {
     int cntNNI = 0;
     int numRandomNNI;
     Branches nniBranches;
     Branches nonNNIBranches;
+
     if (storeTabu) {
         Branches stableBranches;
-        getStableBranches(candidateTrees.getCandSplits(), Params::getInstance().stableSplitThreshold, stableBranches);
-        int numNonStableBranches = leafNum - 3 - stableBranches.size();
+        getStableBranches(candidateTrees.getCandSplits(),
+                          Params::getInstance().stableSplitThreshold,
+                          stableBranches);
+        int numNonStableBranches = leafNum - 3 - (int)stableBranches.size();
         numRandomNNI = numNonStableBranches;
     } else {
-        numRandomNNI = floor((leafNum - 3) * Params::getInstance().initPS);
-        if (leafNum >= 4 && numRandomNNI == 0)
-            numRandomNNI = 1;
+        numRandomNNI = (int)floor((leafNum - 3) * Params::getInstance().initPS);
+        if (leafNum >= 4 && numRandomNNI == 0) numRandomNNI = 1;
     }
-
 
     while (cntNNI < numRandomNNI) {
         nniBranches.clear();
         nonNNIBranches.clear();
-        getNNIBranches(initTabuSplits, candidateTrees.getCandSplits(), nonNNIBranches, nniBranches);
+        getNNIBranches(initTabuSplits, candidateTrees.getCandSplits(),
+                       nonNNIBranches, nniBranches);
         if (nniBranches.size() == 0) break;
-        // Convert the map data structure Branches to vector of Branch
-        vector<Branch> vectorNNIBranches;
+
+        // Convert Branches -> vector<Branch> (stable order)
+        std::vector<Branch> vectorNNIBranches;
+        vectorNNIBranches.reserve(nniBranches.size());
         for (Branches::iterator it = nniBranches.begin(); it != nniBranches.end(); ++it) {
             vectorNNIBranches.push_back(it->second);
         }
-        // Return (a,b) where a is the smaller clade size across branch (u,v)
+
+        // Helper to compute clade sizes a,b for the branch (min first)
         auto getCladeSizes = [&](const Branch& br) -> std::pair<int,int> {
             Node* u = br.first;
             Node* v = br.second;
-
-            // Look up the neighbor entry u->v and use its cached split
             Neighbor* n = u->findNeighbor(v);
-            int a = 1; // sensible fallback for pendant edge
-            if (n && n->split) {
-                a = n->split->countTaxa();   // O(1): number of taxa on the v-side clade
-            }
+            int a = 1;
+            if (n && n->split) a = n->split->countTaxa();
             int b = leafNum - a;
-            if (a > b) std::swap(a, b);      // keep a = min(a,b)
+            if (a > b) std::swap(a, b);
             return {a, b};
         };
 
-        // int randInt = random_int((int) vectorNNIBranches.size());
-        // NNIMove randNNI = getRandomNNI(vectorNNIBranches[randInt]);
-        // ---- length-biased selection: p(i) ∝ len(u,v)^(-alpha) ----
+        // --- Gather lengths and rank/E (if needed) ---
+        const int shortMode = Params::getInstance().nniShortBiasMode;   // 0..5
+        const double alpha  = Params::getInstance().nniAlpha;           // ≥ 0
+        const double beta   = Params::getInstance().nniShortBiasShift;      // > 0 for shifted modes
 
+        std::vector<double> lengths;
+        lengths.reserve(vectorNNIBranches.size());
+        for (const auto& br : vectorNNIBranches) lengths.push_back(branchLengthSafe(br));
 
-        auto getBranchLengthSafe = [&](const Branch &b) -> double {
-            Node *u = b.first;
-            Node *v = b.second;
+        std::vector<double> rOverE;
+        if (shortMode == 4 || shortMode == 5) {
+            rOverE = computeRankOverE(vectorNNIBranches, lengths);
+        }
 
+        // Short-branch bias weights by mode
+        std::vector<double> wShort = computeShortBiasWeights(shortMode, alpha, beta, lengths, rOverE);
 
-            // Prefer neighbor from u to v
-            double L = 0.0;
-            if (Neighbor* n = u->findNeighbor(v)) {
-                L = n->length;
-            } else if (Neighbor* m = v->findNeighbor(u)) {
-                // Fallback (shouldn’t normally happen if the tree is consistent)
-                L = m->length;
-            } else {
-                // If neither side sees the other, use 0 so weight=0^(-alpha)=1
-                L = 0.0;
-            }
+        // Internal clade bias (existing options: ab|min)
+        const int    intMode = Params::getInstance().nniCladeBiasMode;
+        const double gamma   = Params::getInstance().nniCladeBiasGamma;
 
-
-            if (!(L >= 0.0) || std::isnan(L)) L = 0.0;  // Keep safe for L^-alpha
-            std::cout << L << std::endl;
-            return L;
-        };
-
-        // Alpha is set via input argument, the default value is 0
-        double alpha = Params::getInstance().nniAlpha;
-        const int mode = Params::getInstance().nniCladeBiasMode;
-        const double gamma = Params::getInstance().nniCladeBiasGamma;
-
-        std::vector<double> weights;
-        weights.reserve(vectorNNIBranches.size());
-        double sumW = 0.0;
-        for (const auto &br : vectorNNIBranches) {
-            const double L = getBranchLengthSafe(br);
-            double wInternal = 1.0;
-            if (mode) {
-                auto [a, b] = getCladeSizes(br);
-                if (mode == 1) {                 // ab mode
-                    wInternal = std::pow( (double)a * (double)b, gamma );
-                } else if (mode == 2) {          // min mode
-                    wInternal = std::pow( (double)std::min(a,b), gamma );
+        std::vector<double> wInternal(wShort.size(), 1.0);
+        if (intMode != 0 && gamma != 0.0) {
+            for (size_t i = 0; i < vectorNNIBranches.size(); ++i) {
+                auto [a, b] = getCladeSizes(vectorNNIBranches[i]);
+                if (intMode == 1) {        // ab
+                    wInternal[i] = std::pow((double)a * (double)b, gamma);
+                } else if (intMode == 2) { // min
+                    wInternal[i] = std::pow((double)std::min(a, b), gamma);
                 }
             }
-            
-            const double wLen = (L > 0.0) ? std::pow(L, -alpha) : 1.0; // Updated weight calculation (This line is being run as w = ...)
-
-            // final weight (multiplicative with length bias)
-            const double w = wLen * wInternal;
-
-            // const double w = std::exp(-alpha * L);
-            weights.push_back(w);
-            sumW += w;
         }
 
-        // Sample index proportional to weights (implicit normalization)
-        int picked = 0;
-        if (sumW > 0.0) {
-            const double u = random_double() * sumW;
-            double acc = 0.0;
-            for (size_t i = 0; i < weights.size(); ++i) {
-                acc += weights[i];
-                if (u <= acc) { picked = static_cast<int>(i); break; }
-            }
-        } else {
-            // Degenerate fallback: uniform
-            picked = random_int((int)vectorNNIBranches.size());
-        }
+        // Combine multiplicatively: final weights = wShort * wInternal
+        mulInPlace(wShort, wInternal);
 
-
+        // Sample one branch by weights
+        const int picked = sampleIndexByWeights(wShort);
         NNIMove randNNI = getRandomNNI(vectorNNIBranches[picked]);
-        // ---- end length-biased selection ----
-
 
         if (constraintTree.isCompatible(randNNI)) {
-            // only if random NNI satisfies constraintTree
             doNNI(randNNI);
             if (storeTabu) {
-                Split *sp = getSplit(randNNI.node1, randNNI.node2);
-                Split *tabuSplit = new Split(*sp);
-                if (tabuSplit->shouldInvert()) {
-                    tabuSplit->invert();
-                }
+                Split* sp = getSplit(randNNI.node1, randNNI.node2);
+                Split* tabuSplit = new Split(*sp);
+                if (tabuSplit->shouldInvert()) tabuSplit->invert();
                 initTabuSplits.insertSplit(tabuSplit, 1);
             }
         }
         cntNNI++;
     }
+
     if (verbose_mode >= VB_MAX)
         cout << "Tree perturbation: number of random NNI performed = " << cntNNI << endl;
+
     setAlignment(aln);
     setRootNode(params->root);
 
