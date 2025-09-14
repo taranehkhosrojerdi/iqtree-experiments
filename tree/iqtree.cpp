@@ -32,6 +32,7 @@
 //#include "phylotreemixlen.h"
 //#include "model/modelfactorymixlen.h"
 #include <numeric>
+#include <unordered_set>
 #include "utils/tools.h"
 #include "utils/MPIHelper.h"
 #include "utils/pllnni.h"
@@ -3326,10 +3327,12 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         appliedNNIs.clear();
         getCompatibleNNIs(positiveNNIs, appliedNNIs);
 
-        // do non-conflicting positive NNIs
+        // do non-conflicting positive NNIs (FIRST LIST)
         doNNIs(appliedNNIs);
         curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
 
+        // If worse than the best single NNI in the batch, fall back to a single move
+        bool forcedSingle = false;
         if (curScore < appliedNNIs.at(0).newloglh - params->loglh_epsilon) {
             //cout << "Tree getting worse: curScore = " << curScore << " / best score = " <<  appliedNNIs.at(0).newloglh << endl;
             // tree cannot be worse if only 1 NNI is applied
@@ -3343,11 +3346,11 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                 doNNIs(appliedNNIs);
                 curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
                 ASSERT(curScore > appliedNNIs.at(0).newloglh - 0.1);
-            } else
+                forcedSingle = true;
+            } else {
                 ASSERT(curScore > appliedNNIs.at(0).newloglh - 0.1 && "Using one NNI reduces LogL");
-            totalNNIApplied++;
-        } else {
-            totalNNIApplied += appliedNNIs.size();
+            }
+            // NOTE: do NOT increment totalNNIApplied here; defer until after second-list decision
         }
 
         if(curScore < oldScore - params->loglh_epsilon){
@@ -3356,8 +3359,55 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
             showProgress();
         }
 
-        if (curScore - oldScore <  params->loglh_epsilon)
+        // --- Try SECOND non-conflicting list if first didn’t improve ---
+        bool improvedFirst = (curScore - oldScore) >= params->loglh_epsilon;
+
+        if (!improvedFirst && Params::getInstance().secondNNIList) {
+            // Roll back to the original tree before first batch
+            if (!appliedNNIs.empty()) {
+                doNNIs(appliedNNIs);   // undo by applying the same moves again
+            }
+            restoreBranchLengths(lenvec);
+            clearAllPartialLH();
+            curScore = oldScore;
+            
+            if (verbose_mode >= VB_DEBUG && !progress_display::getProgressDisplay()) {
+                std::cout << "[NNI] First batch didn’t improve; trying second non-conflicting batch..." << std::endl;
+            }
+
+            // Build and try the SECOND list
+            std::vector<NNIMove> secondList;
+            getSecondCompatibleNNIs(positiveNNIs, appliedNNIs, secondList);
+
+            if (!secondList.empty()) {
+                doNNIs(secondList);
+                double curScore2 = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
+
+                // Choose better of (original, second list)
+                if (curScore2 - oldScore >= params->loglh_epsilon) {
+                    // keep second list
+                    appliedNNIs.swap(secondList);
+                    curScore = curScore2;
+                } else {
+                    // revert second list and keep original
+                    doNNIs(secondList);     // undo
+                    restoreBranchLengths(lenvec);
+                    clearAllPartialLH();
+                    curScore = oldScore;
+                    // appliedNNIs remains from first list, but topology is original;
+                    // we will only count NNIs if improvement occurred (guarded below).
+                }
+            }
+        }
+
+        // ---- Bookkeeping & exit decision AFTER considering both lists ----
+        if (curScore - oldScore >= params->loglh_epsilon) {
+            // Count only the NNIs that actually stuck (first list possibly forcedSingle, or second list)
+            totalNNIApplied += (unsigned)appliedNNIs.size();
+        } else {
+            // Neither list improved; end the NNI round
             break;
+        }
 
         if (params->snni && (curScore > curBestScore + 0.1)) {
             curBestScore = curScore;
@@ -3587,6 +3637,53 @@ void IQTree::getCompatibleNNIs(vector<NNIMove> &nniMoves, vector<NNIMove> &compa
         }
     }
 }
+
+// Build a SECOND non-conflicting list: seed with the first move
+// not present in 'first', then extend with more non-conflicting moves.
+void IQTree::getSecondCompatibleNNIs(const std::vector<NNIMove>& full,
+                                     const std::vector<NNIMove>& first,
+                                     std::vector<NNIMove>& second) {
+    auto inFirst = [&](const NNIMove& m)->bool {
+        for (const auto& f : first) {
+            // "Equality" by endpoints is sufficient here; these are the same
+            // comparisons used by getCompatibleNNIs(...) for conflict checks.
+            if ((m.node1 == f.node1 && m.node2 == f.node2) ||
+                (m.node1 == f.node2 && m.node2 == f.node1)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto conflictsWith = [&](const NNIMove& cand, const std::vector<NNIMove>& picked)->bool {
+        for (const auto& sel : picked) {
+            if (cand.node1 == sel.node1 ||
+                cand.node1 == sel.node2 ||
+                cand.node2 == sel.node1 ||
+                cand.node2 == sel.node2) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    second.clear();
+
+    // Seed: first candidate in 'full' that is NOT in 'first'
+    for (const auto& m : full) {
+        if (!inFirst(m)) {
+            second.push_back(m);
+            break;
+        }
+    }
+    if (second.empty()) return;
+
+    // Extend: scan 'full' for more non-conflicting candidates not in 'first'
+    for (const auto& cand : full) {
+        if (inFirst(cand)) continue;
+        if (!conflictsWith(cand, second)) second.push_back(cand);
+    }
+}
+
 
 //double IQTree::estN95() {
 //    if (vecNumNNI.size() == 0) {

@@ -478,6 +478,10 @@ public:
      *  @return list of compatible NNIs
      */
     void getCompatibleNNIs(vector<NNIMove> &nniMoves, vector<NNIMove> &compatibleNNIs);
+    
+    void getSecondCompatibleNNIs(const std::vector<NNIMove>& full,
+                               const std::vector<NNIMove>& first,
+                               std::vector<NNIMove>& second);
 
     /**
             add a NNI move to the list of possible NNI moves;

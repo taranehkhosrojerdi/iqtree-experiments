@@ -24,6 +24,7 @@
 #include <string.h>
 #include <cmath>
 #include <assert.h>
+#include <unordered_set>
 
 #define GLOBAL_VARIABLES_DEFINITION
 
@@ -301,6 +302,49 @@ void pllSaveAllQuartet(pllInstance *tr, SearchInfo &searchinfo) {
 }
 */
 
+// Build a SECOND batch for PLL path: seed with the first candidate NOT in 'first',
+// then extend with more that don't reuse either endpoint of already picked moves.
+static void buildSecondNNIBatch(const std::vector<pllNNIMove>& full,
+                                const std::vector<pllNNIMove>& first,
+                                std::vector<pllNNIMove>& second) {
+    auto inFirst = [&](const pllNNIMove& m)->bool {
+        for (const auto& f : first) {
+            // Uniqueness key: center edge 'p' and the NNI type (swap side).
+            if (m.p == f.p && m.nniType == f.nniType) return true;
+        }
+        return false;
+    };
+
+    auto conflicts = [&](const pllNNIMove& cand, const std::vector<pllNNIMove>& picked)->bool {
+        for (const auto& s : picked) {
+            // Reuse the same rule as first batch: forbid sharing either endpoint of the inner edge
+            int a1 = cand.p->number, b1 = cand.p->back->number;
+            int a2 = s.p->number,    b2 = s.p->back->number;
+            if (a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2) return true;
+        }
+        return false;
+    };
+
+    second.clear();
+
+    // 'full' is sorted ascending and the first batch is picked by reverse-iterating,
+    // so we also reverse-iterate to prioritize higher-likelihood moves.
+    bool seeded = false;
+    for (auto it = full.rbegin(); it != full.rend(); ++it) {
+        if (!inFirst(*it)) {
+            second.push_back(*it);
+            seeded = true;
+            break;
+        }
+    }
+    if (!seeded) return;
+
+    for (auto it = full.rbegin(); it != full.rend(); ++it) {
+        const auto& cand = *it;
+        if (inFirst(cand)) continue;
+        if (!conflicts(cand, second)) second.push_back(cand);
+    }
+}
 double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo) {
 	double initLH = tr->likelihood;
 	double finalLH = initLH;
@@ -319,12 +363,12 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 		searchinfo.aBranches.clear();
 	}
 
-	/* apply non-conflicting positive NNIs */
+	/* apply non-conflicting positive NNIs (FIRST LIST) */
 	if (searchinfo.posNNIList.size() != 0) {
 		sort(searchinfo.posNNIList.begin(), searchinfo.posNNIList.end(), comparePLLNNIMove);
         if (verbose_mode >= VB_DEBUG) {
         	cout << "curScore: "  << searchinfo.curLogl << endl;
-            for (int i = 0; i < searchinfo.posNNIList.size(); i++) {
+            for (int i = 0; i < (int)searchinfo.posNNIList.size(); i++) {
                 cout << "Logl of positive NNI " << i << " : " << searchinfo.posNNIList[i].likelihood << endl;
             }
         }
@@ -338,8 +382,8 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 			}
 		}
 
-		/* Applying all independent NNI moves */
-		searchinfo.curNumAppliedNNIs = selectedNNIs.size();
+		/* Applying all independent NNI moves (FIRST LIST) */
+		searchinfo.curNumAppliedNNIs = (int)selectedNNIs.size();
 		for (vector<pllNNIMove>::iterator it = selectedNNIs.begin(); it != selectedNNIs.end(); it++) {
 			/* do the topological change */
 			doOneNNI(tr, pr, (*it).p, (*it).nniType, TOPO_ONLY);
@@ -362,7 +406,7 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 			if (globalParams->count_trees) {
 	            countDistinctTrees(tr, pr);
 			}
-			int numNNI = selectedNNIs.size();
+			int numNNI = (int)selectedNNIs.size();
 			/* new tree likelihood should not be smaller the likelihood of the computed best NNI */
 			while (tr->likelihood < selectedNNIs.back().likelihood) {
 				if (numNNI == 1) {
@@ -380,8 +424,21 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 				    // If tree log-likelihood decreases only apply the best NNI
 					numNNI = 1;
 					int count = numNNI;
+
+					// Parity: aBranches should reflect ONLY what we keep
+					if (globalParams->speednni) {
+						searchinfo.aBranches.clear();
+					}
+
 					for (vector<pllNNIMove>::reverse_iterator rit = selectedNNIs.rbegin(); rit != selectedNNIs.rend(); ++rit) {
 						doOneNNI(tr, pr, (*rit).p, (*rit).nniType, TOPO_ONLY);
+
+						// Rebuild aBranches only for the single best move we actually keep
+						if (globalParams->speednni) {
+							vector<string> aBranches = getAffectedBranches(tr, (*rit).p);
+							searchinfo.aBranches.insert(aBranches.begin(), aBranches.end());
+						}
+
 						updateBranchLengthForNNI(tr, pr, (*rit));
 			            if (numBranches > 1 && !tr->useRecom) {
 			                pllUpdatePartials(tr, pr, (*rit).p, PLL_TRUE);
@@ -403,10 +460,192 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 					searchinfo.curNumAppliedNNIs = numNNI;
 				}
 			}
-			if (tr->likelihood - initLH < 0.1) {
-				searchinfo.curNumAppliedNNIs = 0;
-			}
 			finalLH = tr->likelihood;
+
+			/* =========================
+			   SECOND NON-CONFLICTING LIST
+			   Try only if the first list did NOT improve the likelihood
+			   ========================= */
+			if (finalLH < initLH + 1e-6 && globalParams->secondNNIList) {
+				// Restore to the saved pre-batch tree
+				if (!restoreTree(curTree, tr, pr)) {
+					printf("ERROR: failed to restore tree before trying second NNI list.\n");
+					ASSERT(0);
+				}
+				if (verbose_mode >= VB_DEBUG) {
+        			std::cout << "[NNI] First batch didn’t improve; trying second non-conflicting batch..." << std::endl;
+    			}
+				// Parity: speed-NNI bookkeeping starts fresh for the second attempt
+				if (globalParams->speednni) {
+					searchinfo.aBranches.clear();
+				}
+
+				// Build second non-conflicting list:
+				// seed with the first candidate NOT used in the first list,
+				// then extend with more non-conflicting candidates (endpoints not reused).
+				vector<pllNNIMove> secondNNIs;
+				secondNNIs.reserve(selectedNNIs.size()); // rough guess
+
+				auto inFirst = [&](const pllNNIMove& m)->bool {
+					for (const auto& f : selectedNNIs) {
+						if (m.p == f.p && m.nniType == f.nniType) return true;
+					}
+					return false;
+				};
+
+				unordered_set<int> usedSecondNodes;
+				bool seeded = false;
+				for (auto it = searchinfo.posNNIList.rbegin(); it != searchinfo.posNNIList.rend(); ++it) {
+					if (!inFirst(*it)) {
+						secondNNIs.push_back(*it);
+						usedSecondNodes.insert((*it).p->number);
+						usedSecondNodes.insert((*it).p->back->number);
+						seeded = true;
+						break;
+					}
+				}
+				if (seeded) {
+					for (auto it = searchinfo.posNNIList.rbegin(); it != searchinfo.posNNIList.rend(); ++it) {
+						if (inFirst(*it)) continue;
+						int a = (*it).p->number;
+						int b = (*it).p->back->number;
+						if (usedSecondNodes.find(a) != usedSecondNodes.end() || usedSecondNodes.find(b) != usedSecondNodes.end())
+							continue;
+						secondNNIs.push_back(*it);
+						usedSecondNodes.insert(a);
+						usedSecondNodes.insert(b);
+					}
+
+					// Apply second list
+					searchinfo.curNumAppliedNNIs = (int)secondNNIs.size();
+					for (vector<pllNNIMove>::iterator it = secondNNIs.begin(); it != secondNNIs.end(); ++it) {
+						doOneNNI(tr, pr, (*it).p, (*it).nniType, TOPO_ONLY);
+						if (globalParams->speednni) {
+							vector<string> aBranches = getAffectedBranches(tr, (*it).p);
+							searchinfo.aBranches.insert(aBranches.begin(), aBranches.end());
+						}
+						updateBranchLengthForNNI(tr, pr, (*it));
+			            if (numBranches > 1 && !tr->useRecom) {
+			                pllUpdatePartials(tr, pr, (*it).p, PLL_TRUE);
+			                pllUpdatePartials(tr, pr, (*it).p->back, PLL_TRUE);
+			            } else {
+			                pllUpdatePartials(tr, pr, (*it).p, PLL_FALSE);
+			                pllUpdatePartials(tr, pr, (*it).p->back, PLL_FALSE);
+			            }
+					}
+
+					if (!secondNNIs.empty()) {
+						pllOptimizeBranchLengths(tr, pr, 1);
+						if (globalParams->count_trees) {
+				            countDistinctTrees(tr, pr);
+						}
+						int numNNI2 = (int)secondNNIs.size();
+						// Safety: final LH should not be smaller than the best single NNI in this batch
+						while (tr->likelihood < secondNNIs.back().likelihood) {
+							if (numNNI2 == 1) {
+								printf("ERROR: new logl=%10.4f after applying only the best NNI (second list) < best NNI logl=%10.4f\n",
+										tr->likelihood, secondNNIs[0].likelihood);
+								ASSERT(0);
+							} else {
+								cout << "Best logl (2nd): " << secondNNIs.back().likelihood
+								     << " / " << "NNI step " << searchinfo.curNumNNISteps
+								     << " / Applying " << numNNI2 << " NNIs give logl: " << tr->likelihood
+								     << " (worse than best) / Roll back tree ..." << endl;
+								if (!restoreTree(curTree, tr, pr)) {
+									printf("ERROR: failed to roll back tree (second list)\n");
+									ASSERT(0);
+								}
+								// Apply only the best NNI from second list
+								numNNI2 = 1;
+								int count2 = numNNI2;
+
+								// Parity: reflect only the best move in aBranches
+								if (globalParams->speednni) {
+									searchinfo.aBranches.clear();
+								}
+
+								for (vector<pllNNIMove>::reverse_iterator rit = secondNNIs.rbegin(); rit != secondNNIs.rend(); ++rit) {
+									doOneNNI(tr, pr, (*rit).p, (*rit).nniType, TOPO_ONLY);
+
+									if (globalParams->speednni) {
+										vector<string> aBranches = getAffectedBranches(tr, (*rit).p);
+										searchinfo.aBranches.insert(aBranches.begin(), aBranches.end());
+									}
+
+									updateBranchLengthForNNI(tr, pr, (*rit));
+						            if (numBranches > 1 && !tr->useRecom) {
+						                pllUpdatePartials(tr, pr, (*rit).p, PLL_TRUE);
+						                pllUpdatePartials(tr, pr, (*rit).p->back, PLL_TRUE);
+						            } else {
+						                pllUpdatePartials(tr, pr, (*rit).p, PLL_FALSE);
+						                pllUpdatePartials(tr, pr, (*rit).p->back, PLL_FALSE);
+						            }
+									count2--;
+									if (count2 == 0) break;
+								}
+								pllOptimizeBranchLengths(tr, pr, 1);
+								searchinfo.curNumAppliedNNIs = numNNI2;
+							}
+						}
+
+						// Decide which topology to keep: original vs. second list
+						if (tr->likelihood < initLH + 1e-6) {
+							// no improvement: revert and keep original
+							if (!restoreTree(curTree, tr, pr)) {
+								printf("ERROR: failed to roll back second NNI list.\n");
+								ASSERT(0);
+							}
+							searchinfo.curNumAppliedNNIs = 0;
+
+							// Parity: no second-batch moves are kept, so clear aBranches
+							if (globalParams->speednni) {
+								searchinfo.aBranches.clear();
+							}
+
+							finalLH = initLH;
+						} else {
+							// improvement from second list
+							if (tr->likelihood - initLH < 0.1) {
+								searchinfo.curNumAppliedNNIs = 0;
+							}
+							finalLH = tr->likelihood;
+						}
+					} else {
+						// nothing to try in the second list; keep original
+						if (!restoreTree(curTree, tr, pr)) {
+							printf("ERROR: failed to restore tree (empty second list)\n");
+							ASSERT(0);
+						}
+						searchinfo.curNumAppliedNNIs = 0;
+
+						// Parity: nothing from second batch stuck
+						if (globalParams->speednni) {
+							searchinfo.aBranches.clear();
+						}
+
+						finalLH = initLH;
+					}
+				} else {
+					// could not seed a second list; nothing to do, keep original
+					if (!restoreTree(curTree, tr, pr)) {
+						printf("ERROR: failed to restore tree (no seed for second list)\n");
+						ASSERT(0);
+					}
+					searchinfo.curNumAppliedNNIs = 0;
+
+					if (globalParams->speednni) {
+						searchinfo.aBranches.clear();
+					}
+
+					finalLH = initLH;
+				}
+			} else {
+				// first list improved; keep as-is
+				if (tr->likelihood - initLH < 0.1) {
+					searchinfo.curNumAppliedNNIs = 0;
+				}
+				finalLH = tr->likelihood;
+			}
 		}
 	} else {
 		searchinfo.curNumAppliedNNIs = 0;

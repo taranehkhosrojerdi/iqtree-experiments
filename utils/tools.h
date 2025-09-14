@@ -789,6 +789,11 @@ public:
 	 *  weight for bias towards more internal branches in random perturbation
 	 */
 	double nniCladeBiasGamma;
+
+    /**
+	 *  flag to activate secondary nni list
+	 */
+    bool secondNNIList;
     
     /**
 	 *  logl epsilon for model parameter optimization

@@ -5137,6 +5137,12 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
 
+            // --second-nni-list
+            if (arg == "--second-nni-list") {
+                Params::getInstance().secondNNIList = true;
+                continue;
+            }
+
 //			if (strcmp(argv[cnt], "-rootstate") == 0) {
 //                cnt++;
 //                if (cnt >= argc)
@@ -7849,6 +7855,8 @@ void Params::setDefault() {
     nniShortBiasShift = 0;
     nniCladeBiasMode = 0;
     nniCladeBiasGamma = 1.0;
+    secondNNIList = false;
+
 #ifdef USING_PLL
     pll = true;
 #else
