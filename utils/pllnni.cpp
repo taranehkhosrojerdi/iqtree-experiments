@@ -506,7 +506,6 @@ double pllDoNNISearch(pllInstance* tr, partitionList *pr, SearchInfo &searchinfo
 				}
 				if (seeded) {
 					for (auto it = searchinfo.posNNIList.rbegin(); it != searchinfo.posNNIList.rend(); ++it) {
-						if (inFirst(*it)) continue;
 						int a = (*it).p->number;
 						int b = (*it).p->back->number;
 						if (usedSecondNodes.find(a) != usedSecondNodes.end() || usedSecondNodes.find(b) != usedSecondNodes.end())

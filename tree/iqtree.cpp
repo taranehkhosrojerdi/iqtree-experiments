@@ -3679,7 +3679,6 @@ void IQTree::getSecondCompatibleNNIs(const std::vector<NNIMove>& full,
 
     // Extend: scan 'full' for more non-conflicting candidates not in 'first'
     for (const auto& cand : full) {
-        if (inFirst(cand)) continue;
         if (!conflictsWith(cand, second)) second.push_back(cand);
     }
 }
