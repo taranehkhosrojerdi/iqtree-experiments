@@ -5079,6 +5079,11 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.openmp_by_model = false;
                 continue;
             }
+            
+            if (strcmp(argv[cnt], "--weighted-perturbation") == 0 || strcmp(argv[cnt], "-weighted-perturbation") == 0) {
+                params.weightedPerturbation = true;
+                continue;
+            }
 
 //			if (strcmp(argv[cnt], "-rootstate") == 0) {
 //                cnt++;
@@ -7787,6 +7792,7 @@ void Params::setDefault() {
     new_heuristic = true;
     iteration_multiple = 1;
     initPS = 0.5;
+    weightedPerturbation = false;
 #ifdef USING_PLL
     pll = true;
 #else
